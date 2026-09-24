@@ -50,6 +50,9 @@ pub const CDC_BACKFILL_PARALLELISM: &str = "backfill.parallelism";
 pub const CDC_BACKFILL_NUM_ROWS_PER_SPLIT: &str = "backfill.num_rows_per_split";
 pub const CDC_BACKFILL_AS_EVEN_SPLITS: &str = "backfill.as_even_splits";
 pub const CDC_BACKFILL_SPLIT_PK_COLUMN_INDEX: &str = "backfill.split_pk_column_index";
+// User-supplied WHERE-clause fragment applied during the initial CDC snapshot backfill.
+// Example: `snapshot.filter = 'color = ''blue'''` restricts the snapshot to rows matching the predicate.
+pub const CDC_SNAPSHOT_FILTER_KEY: &str = "snapshot.filter";
 // We enable transaction for shared cdc source by default
 pub const CDC_TRANSACTIONAL_KEY: &str = "transactional";
 pub const CDC_WAIT_FOR_STREAMING_START_TIMEOUT: &str = "cdc.source.wait.streaming.start.timeout";
@@ -319,6 +322,10 @@ pub struct CdcScanOptions {
     pub backfill_as_even_splits: bool,
     /// Used by parallelized backfill. Specify the index of primary key column to use as split column.
     pub backfill_split_pk_column_index: u32,
+    /// Optional WHERE-clause fragment (referencing upstream column names) that is AND-combined with the
+    /// internal primary-key cursor during the initial snapshot backfill. `None` means no extra filter
+    /// (default behavior).
+    pub snapshot_filter: Option<String>,
 }
 
 impl Default for CdcScanOptions {
@@ -332,6 +339,7 @@ impl Default for CdcScanOptions {
             backfill_num_rows_per_split: 100_000,
             backfill_as_even_splits: true,
             backfill_split_pk_column_index: 0,
+            snapshot_filter: None,
         }
     }
 }
@@ -346,6 +354,7 @@ impl CdcScanOptions {
             backfill_num_rows_per_split: self.backfill_num_rows_per_split,
             backfill_as_even_splits: self.backfill_as_even_splits,
             backfill_split_pk_column_index: self.backfill_split_pk_column_index,
+            snapshot_filter: self.snapshot_filter.clone().unwrap_or_default(),
         }
     }
 
@@ -358,6 +367,11 @@ impl CdcScanOptions {
             backfill_num_rows_per_split: proto.backfill_num_rows_per_split,
             backfill_as_even_splits: proto.backfill_as_even_splits,
             backfill_split_pk_column_index: proto.backfill_split_pk_column_index,
+            snapshot_filter: if proto.snapshot_filter.is_empty() {
+                None
+            } else {
+                Some(proto.snapshot_filter.clone())
+            },
         }
     }
 

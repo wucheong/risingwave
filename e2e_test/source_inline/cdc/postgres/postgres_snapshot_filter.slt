@@ -1,0 +1,80 @@
+# Test the `snapshot.filter` option for Postgres CDC backfill.
+# Only rows whose `color = 'blue'` are included in the initial snapshot;
+# subsequent live CDC changes are also filtered.
+#
+# Semantics reference: `snapshot.filter` specifies a WHERE-clause fragment
+# AND-combined with the internal primary-key cursor, e.g.
+#     snapshot.filter = 'color = ''blue'''
+# Quotes are escaped per SQL string-literal rules.
+
+control substitution on
+
+system ok
+psql -c "
+    DROP TABLE IF EXISTS test_snapshot_filter;
+    CREATE TABLE test_snapshot_filter (
+            id INT PRIMARY KEY,
+            color VARCHAR(16) NOT NULL
+        );
+    INSERT INTO test_snapshot_filter (id, color) VALUES
+        (1, 'blue'),
+        (2, 'red'),
+        (3, 'blue'),
+        (4, 'green'),
+        (5, 'blue');
+"
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+create source pg_snapshot_filter_source with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST}',
+    port = '${PGPORT}',
+    username = '${PGUSER}',
+    password = '${PGPASSWORD}',
+    database.name = '${PGDATABASE}',
+    slot.name = 'rw_slot_snapshot_filter'
+);
+
+# `snapshot.filter` restricts the initial backfill to blue rows.
+statement ok
+create table t_snapshot_filter (id INT PRIMARY KEY, color VARCHAR)
+    FROM pg_snapshot_filter_source TABLE 'public.test_snapshot_filter'
+    WITH (snapshot.filter = 'color = ''blue''');
+
+# Snapshot backfill should only load the three blue rows (ids 1, 3, 5).
+query IT rowsort
+select * from t_snapshot_filter;
+----
+1 blue
+3 blue
+5 blue
+
+# Live CDC: a new red row should NOT appear (the filter is reapplied to
+# subsequent wal events).
+system ok
+psql -c "INSERT INTO test_snapshot_filter (id, color) VALUES (6, 'red');"
+
+sleep 3s
+
+# A new blue row, however, should appear.
+system ok
+psql -c "INSERT INTO test_snapshot_filter (id, color) VALUES (7, 'blue');"
+
+sleep 3s
+
+query IT rowsort
+select * from t_snapshot_filter;
+----
+1 blue
+3 blue
+5 blue
+7 blue
+
+statement ok
+drop table t_snapshot_filter;
+
+statement ok
+drop source pg_snapshot_filter_source cascade;

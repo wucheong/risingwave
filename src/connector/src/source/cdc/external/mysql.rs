@@ -585,8 +585,15 @@ impl ExternalTableReader for MySqlExternalTableReader {
         start_pk: Option<OwnedRow>,
         primary_keys: Vec<String>,
         limit: u32,
+        snapshot_filter: Option<String>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
-        self.snapshot_read_inner(table_name, start_pk, primary_keys, limit)
+        self.snapshot_read_inner(
+            table_name,
+            start_pk,
+            primary_keys,
+            limit,
+            snapshot_filter,
+        )
     }
 
     async fn disconnect(self) -> ConnectorResult<()> {
@@ -607,6 +614,7 @@ impl ExternalTableReader for MySqlExternalTableReader {
         _left: OwnedRow,
         _right: OwnedRow,
         _split_columns: Vec<Field>,
+        _snapshot_filter: Option<String>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
         todo!("implement MySQL CDC parallelized backfill")
     }
@@ -770,27 +778,47 @@ impl MySqlExternalTableReader {
         start_pk_row: Option<OwnedRow>,
         primary_keys: Vec<String>,
         limit: u32,
+        snapshot_filter: Option<String>,
     ) {
         let order_key = primary_keys
             .iter()
             .map(|col| Self::quote_column(col))
             .join(",");
         let sql = if start_pk_row.is_none() {
-            format!(
-                "SELECT {} FROM {} ORDER BY {} LIMIT {limit}",
-                self.field_names,
-                Self::get_normalized_table_name(&table_name),
-                order_key,
-            )
+            match snapshot_filter.as_deref() {
+                Some(f) if !f.trim().is_empty() => format!(
+                    "SELECT {} FROM {} WHERE ({}) ORDER BY {} LIMIT {limit}",
+                    self.field_names,
+                    Self::get_normalized_table_name(&table_name),
+                    f,
+                    order_key,
+                ),
+                _ => format!(
+                    "SELECT {} FROM {} ORDER BY {} LIMIT {limit}",
+                    self.field_names,
+                    Self::get_normalized_table_name(&table_name),
+                    order_key,
+                ),
+            }
         } else {
             let filter_expr = Self::filter_expression(&primary_keys);
-            format!(
-                "SELECT {} FROM {} WHERE {} ORDER BY {} LIMIT {limit}",
-                self.field_names,
-                Self::get_normalized_table_name(&table_name),
-                filter_expr,
-                order_key,
-            )
+            match snapshot_filter.as_deref() {
+                Some(f) if !f.trim().is_empty() => format!(
+                    "SELECT {} FROM {} WHERE ({}) AND ({}) ORDER BY {} LIMIT {limit}",
+                    self.field_names,
+                    Self::get_normalized_table_name(&table_name),
+                    filter_expr,
+                    f,
+                    order_key,
+                ),
+                _ => format!(
+                    "SELECT {} FROM {} WHERE {} ORDER BY {} LIMIT {limit}",
+                    self.field_names,
+                    Self::get_normalized_table_name(&table_name),
+                    filter_expr,
+                    order_key,
+                ),
+            }
         };
         let mut conn = self.pool.get_conn().await?;
         // Set session timezone to UTC

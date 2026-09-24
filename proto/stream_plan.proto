@@ -912,6 +912,11 @@ message StreamCdcScanOptions {
   bool backfill_as_even_splits = 6;
 
   uint32 backfill_split_pk_column_index = 7;
+
+  // Optional WHERE-clause fragment applied to the initial snapshot backfill SQL.
+  // The string is AND-combined with the internal primary-key cursor predicate
+  // and may reference upstream column names. Empty means no extra filter.
+  string snapshot_filter = 8;
 }
 
 message StreamCdcScanNode {

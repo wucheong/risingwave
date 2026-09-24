@@ -1,0 +1,89 @@
+# Test the `snapshot.filter` option for MySQL CDC backfill.
+# Only rows whose `color = 'blue'` are included in the initial snapshot;
+# subsequent live CDC changes are also filtered so the user predicate
+# continues to apply.
+#
+# Semantics reference: `snapshot.filter` specifies a WHERE-clause fragment
+# AND-combined with the internal primary-key cursor, e.g.
+#     snapshot.filter = 'color = ''blue'''
+# Quotes are escaped per SQL string-literal rules.
+
+control substitution on
+
+system ok
+mysql -e "
+    CREATE DATABASE IF NOT EXISTS risedev;
+    USE risedev;
+    DROP TABLE IF EXISTS test_snapshot_filter;
+    CREATE TABLE test_snapshot_filter (
+            id INT NOT NULL PRIMARY KEY,
+            color VARCHAR(16) NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+    INSERT INTO test_snapshot_filter (id, color) VALUES
+        (1, 'blue'),
+        (2, 'red'),
+        (3, 'blue'),
+        (4, 'green'),
+        (5, 'blue');
+"
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+create source mysql_snapshot_filter_source with (
+    connector = 'mysql-cdc',
+    password = '${MYSQL_PWD}',
+    hostname = '${MYSQL_HOST}',
+    port = '${MYSQL_TCP_PORT}',
+    username = 'root',
+    database.name = 'risedev',
+    server.id = '5288'
+);
+
+# `snapshot.filter` restricts the initial backfill to blue rows.
+statement ok
+create table t_snapshot_filter (id INT PRIMARY KEY, color VARCHAR)
+    FROM mysql_snapshot_filter_source TABLE 'risedev.test_snapshot_filter'
+    WITH (snapshot.filter = 'color = ''blue''');
+
+# Snapshot backfill should only load the three blue rows (ids 1, 3, 5).
+query IT rowsort
+select * from t_snapshot_filter;
+----
+1 blue
+3 blue
+5 blue
+
+# Live CDC: a new red row should NOT appear (the filter is reapplied to
+# subsequent binlog events).
+system ok
+mysql -e "
+    USE risedev;
+    INSERT INTO test_snapshot_filter (id, color) VALUES (6, 'red');
+"
+
+sleep 3s
+
+# A new blue row, however, should appear.
+system ok
+mysql -e "
+    USE risedev;
+    INSERT INTO test_snapshot_filter (id, color) VALUES (7, 'blue');
+"
+
+sleep 3s
+
+query IT rowsort
+select * from t_snapshot_filter;
+----
+1 blue
+3 blue
+5 blue
+7 blue
+
+statement ok
+drop table t_snapshot_filter;
+
+statement ok
+drop source mysql_snapshot_filter_source cascade;

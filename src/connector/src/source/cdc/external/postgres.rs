@@ -178,9 +178,16 @@ impl ExternalTableReader for PostgresExternalTableReader {
         start_pk: Option<OwnedRow>,
         primary_keys: Vec<String>,
         limit: u32,
+        snapshot_filter: Option<String>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
         assert_eq!(table_name, self.schema_table_name);
-        self.snapshot_read_inner(table_name, start_pk, primary_keys, limit)
+        self.snapshot_read_inner(
+            table_name,
+            start_pk,
+            primary_keys,
+            limit,
+            snapshot_filter,
+        )
     }
 
     #[try_stream(boxed, ok = CdcTableSnapshotSplit, error = ConnectorError)]
@@ -224,9 +231,10 @@ impl ExternalTableReader for PostgresExternalTableReader {
         left: OwnedRow,
         right: OwnedRow,
         split_columns: Vec<Field>,
+        snapshot_filter: Option<String>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
         assert_eq!(table_name, self.schema_table_name);
-        self.split_snapshot_read_inner(table_name, left, right, split_columns)
+        self.split_snapshot_read_inner(table_name, left, right, split_columns, snapshot_filter)
     }
 }
 
@@ -349,10 +357,21 @@ impl PostgresExternalTableReader {
         start_pk_row: Option<OwnedRow>,
         primary_keys: Vec<String>,
         scan_limit: u32,
+        snapshot_filter: Option<String>,
     ) {
         let order_key = Self::get_order_key(&primary_keys);
         let client = self.client.lock().await;
         client.execute("set time zone '+00:00'", &[]).await?;
+
+        // Compose the optional user-supplied WHERE predicate.
+        // Postgres uses positional placeholders ($1, $2, ...) for bound parameters; the
+        // user-supplied filter string is a literal SQL fragment with no placeholders, so we
+        // simply concatenate it without consuming any of the params slots reserved for the
+        // primary-key cursor.
+        let user_filter = snapshot_filter
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
         let stream = match start_pk_row {
             Some(ref pk_row) => {
@@ -366,13 +385,23 @@ impl PostgresExternalTableReader {
                         .collect_vec();
 
                     let order_key = Self::get_order_key(&primary_keys);
-                    let scan_sql = format!(
-                        "SELECT {} FROM {} WHERE {} ORDER BY {} LIMIT {scan_limit}",
-                        self.field_names,
-                        Self::get_normalized_table_name(&table_name),
-                        Self::filter_expression(&primary_keys),
-                        order_key,
-                    );
+                    let scan_sql = match user_filter {
+                        Some(f) => format!(
+                            "SELECT {} FROM {} WHERE ({}) AND ({}) ORDER BY {} LIMIT {scan_limit}",
+                            self.field_names,
+                            Self::get_normalized_table_name(&table_name),
+                            Self::filter_expression(&primary_keys),
+                            f,
+                            order_key,
+                        ),
+                        None => format!(
+                            "SELECT {} FROM {} WHERE {} ORDER BY {} LIMIT {scan_limit}",
+                            self.field_names,
+                            Self::get_normalized_table_name(&table_name),
+                            Self::filter_expression(&primary_keys),
+                            order_key,
+                        ),
+                    };
                     client.prepare(&scan_sql).await?
                 };
 
@@ -389,12 +418,21 @@ impl PostgresExternalTableReader {
                 client.query_raw(&prepared_scan_stmt, &params).await?
             }
             None => {
-                let sql = format!(
-                    "SELECT {} FROM {} ORDER BY {} LIMIT {scan_limit}",
-                    self.field_names,
-                    Self::get_normalized_table_name(&table_name),
-                    order_key,
-                );
+                let sql = match user_filter {
+                    Some(f) => format!(
+                        "SELECT {} FROM {} WHERE ({}) ORDER BY {} LIMIT {scan_limit}",
+                        self.field_names,
+                        Self::get_normalized_table_name(&table_name),
+                        f,
+                        order_key,
+                    ),
+                    None => format!(
+                        "SELECT {} FROM {} ORDER BY {} LIMIT {scan_limit}",
+                        self.field_names,
+                        Self::get_normalized_table_name(&table_name),
+                        order_key,
+                    ),
+                };
                 let params: Vec<Option<ScalarAdapter>> = vec![];
                 client.query_raw(&sql, &params).await?
             }
@@ -621,12 +659,13 @@ impl PostgresExternalTableReader {
         left: OwnedRow,
         right: OwnedRow,
         split_columns: Vec<Field>,
+        snapshot_filter: Option<String>,
     ) {
         // Conceptually, the query is:
         //
         // SELECT <selected_columns>
         // FROM <upstream_table>
-        // WHERE <split_filter>
+        // WHERE <split_filter> [AND <user_filter>]
         //
         // `<split_filter>` is exactly one of:
         // - `1 = 1` when both bounds contain the unbounded `NULL` sentinel;
@@ -634,6 +673,10 @@ impl PostgresExternalTableReader {
         // - `(<split_columns>) >= (<left_bound_params>)` for the last split;
         // - `(<split_columns>) >= (<left_bound_params>) AND
         //    (<split_columns>) < (<right_bound_params>)` for a middle split.
+        //
+        // `<user_filter>` is the optional user-supplied WHERE-clause fragment, AND-combined
+        // with the split filter. It is a literal SQL fragment with no placeholders, so it
+        // does not consume any of the params slots reserved for the split bounds.
         //
         // Bound values are bound in placeholder order: left, then right.
         assert_eq!(
@@ -650,17 +693,35 @@ impl PostgresExternalTableReader {
         let is_first_split = left[0].is_none();
         let is_last_split = right[0].is_none();
         let split_column_names = split_columns.iter().map(|c| c.name.clone()).collect_vec();
+        let user_filter = snapshot_filter
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let client = self.client.lock().await;
         client.execute("set time zone '+00:00'", &[]).await?;
         // prepare the scan statement, since we may need to convert the RW data type to postgres data type
         // e.g. varchar to uuid
         let prepared_scan_stmt = {
-            let scan_sql = format!(
-                "SELECT {} FROM {} WHERE {}",
-                self.field_names,
-                Self::get_normalized_table_name(&table_name),
-                Self::split_filter_expression(&split_column_names, is_first_split, is_last_split),
+            let split_expr = Self::split_filter_expression(
+                &split_column_names,
+                is_first_split,
+                is_last_split,
             );
+            let scan_sql = match user_filter {
+                Some(f) => format!(
+                    "SELECT {} FROM {} WHERE ({}) AND ({})",
+                    self.field_names,
+                    Self::get_normalized_table_name(&table_name),
+                    split_expr,
+                    f,
+                ),
+                None => format!(
+                    "SELECT {} FROM {} WHERE {}",
+                    self.field_names,
+                    Self::get_normalized_table_name(&table_name),
+                    split_expr,
+                ),
+            };
             client.prepare(&scan_sql).await?
         };
 
@@ -1279,6 +1340,7 @@ mod tests {
             Some(start_pk),
             vec!["v1".to_owned(), "v2".to_owned()],
             1000,
+            None,
         );
 
         pin_mut!(stream);

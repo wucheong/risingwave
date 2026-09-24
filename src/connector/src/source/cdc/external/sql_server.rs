@@ -278,8 +278,15 @@ impl ExternalTableReader for SqlServerExternalTableReader {
         start_pk: Option<OwnedRow>,
         primary_keys: Vec<String>,
         limit: u32,
+        snapshot_filter: Option<String>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
-        self.snapshot_read_inner(table_name, start_pk, primary_keys, limit)
+        self.snapshot_read_inner(
+            table_name,
+            start_pk,
+            primary_keys,
+            limit,
+            snapshot_filter,
+        )
     }
 
     fn get_parallel_cdc_splits(
@@ -296,6 +303,7 @@ impl ExternalTableReader for SqlServerExternalTableReader {
         _left: OwnedRow,
         _right: OwnedRow,
         _split_columns: Vec<Field>,
+        _snapshot_filter: Option<String>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
         todo!("implement SqlServer CDC parallelized backfill")
     }
@@ -358,27 +366,51 @@ impl SqlServerExternalTableReader {
         start_pk_row: Option<OwnedRow>,
         primary_keys: Vec<String>,
         limit: u32,
+        snapshot_filter: Option<String>,
     ) {
         let order_key = primary_keys
             .iter()
             .map(|col| Self::quote_column(col))
             .join(",");
+        let user_filter = snapshot_filter
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let mut sql = Query::new(if start_pk_row.is_none() {
-            format!(
-                "SELECT {} FROM {} ORDER BY {} OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY",
-                self.field_names,
-                Self::get_normalized_table_name(&table_name),
-                order_key,
-            )
+            match user_filter {
+                Some(f) => format!(
+                    "SELECT {} FROM {} WHERE ({}) ORDER BY {} OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY",
+                    self.field_names,
+                    Self::get_normalized_table_name(&table_name),
+                    f,
+                    order_key,
+                ),
+                None => format!(
+                    "SELECT {} FROM {} ORDER BY {} OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY",
+                    self.field_names,
+                    Self::get_normalized_table_name(&table_name),
+                    order_key,
+                ),
+            }
         } else {
             let filter_expr = Self::filter_expression(&primary_keys);
-            format!(
-                "SELECT {} FROM {} WHERE {} ORDER BY {} OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY",
-                self.field_names,
-                Self::get_normalized_table_name(&table_name),
-                filter_expr,
-                order_key,
-            )
+            match user_filter {
+                Some(f) => format!(
+                    "SELECT {} FROM {} WHERE ({}) AND ({}) ORDER BY {} OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY",
+                    self.field_names,
+                    Self::get_normalized_table_name(&table_name),
+                    filter_expr,
+                    f,
+                    order_key,
+                ),
+                None => format!(
+                    "SELECT {} FROM {} WHERE {} ORDER BY {} OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY",
+                    self.field_names,
+                    Self::get_normalized_table_name(&table_name),
+                    filter_expr,
+                    order_key,
+                ),
+            }
         });
 
         let mut client = self.client.lock().await;

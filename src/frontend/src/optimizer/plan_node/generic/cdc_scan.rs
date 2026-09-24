@@ -26,7 +26,7 @@ use risingwave_connector::source::cdc::{
     CDC_BACKFILL_AS_EVEN_SPLITS, CDC_BACKFILL_ENABLE_KEY, CDC_BACKFILL_MAX_PARALLELISM,
     CDC_BACKFILL_NUM_ROWS_PER_SPLIT, CDC_BACKFILL_PARALLELISM,
     CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY, CDC_BACKFILL_SNAPSHOT_INTERVAL_KEY,
-    CDC_BACKFILL_SPLIT_PK_COLUMN_INDEX, CdcScanOptions,
+    CDC_BACKFILL_SPLIT_PK_COLUMN_INDEX, CDC_SNAPSHOT_FILTER_KEY, CdcScanOptions,
 };
 
 use super::GenericPlanNode;
@@ -81,6 +81,23 @@ pub fn build_cdc_scan_options_with_options(
         scan_options.snapshot_batch_size = u32::from_str(snapshot_batch_size)
             .map_err(|_| anyhow!("Invalid value for {}", CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY))?;
     };
+
+    // Optional user-supplied WHERE-clause fragment applied during the initial CDC snapshot.
+    // Example: `snapshot.filter = 'color = ''blue'''`.
+    // Only MySQL / Postgres / SQL Server CDC supports a row scan path; MongoDB / Citus would
+    // either silently ignore or have no snapshot to filter. We accept the option everywhere
+    // and let the connector decide (it is currently a no-op for MongoDB / Citus).
+    if let Some(snapshot_filter) = with_options.get(CDC_SNAPSHOT_FILTER_KEY) {
+        let trimmed = snapshot_filter.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!(
+                "Invalid value for {}: empty string is not allowed",
+                CDC_SNAPSHOT_FILTER_KEY
+            )
+            .into());
+        }
+        scan_options.snapshot_filter = Some(trimmed.to_owned());
+    }
 
     if support_backfill_v2 {
         if let Some(backfill_parallelism) = with_options.get(CDC_BACKFILL_PARALLELISM) {

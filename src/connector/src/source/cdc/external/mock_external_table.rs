@@ -206,6 +206,7 @@ impl ExternalTableReader for MockExternalTableReader {
         _start_pk: Option<OwnedRow>,
         _primary_keys: Vec<String>,
         _limit: u32,
+        _snapshot_filter: Option<String>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
         self.snapshot_read_inner()
     }
@@ -223,6 +224,7 @@ impl ExternalTableReader for MockExternalTableReader {
         left: OwnedRow,
         right: OwnedRow,
         split_columns: Vec<Field>,
+        _snapshot_filter: Option<String>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
         assert_eq!(split_columns.len(), 1);
         assert_eq!(split_columns[0].data_type, DataType::Int64);

@@ -651,6 +651,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                     additional_columns.clone(),
                     schema_table_name.clone(),
                     external_database_name.clone(),
+                    self.options.snapshot_filter.clone(),
                 );
                 let right_snapshot = pin!(
                     upstream_table_reader

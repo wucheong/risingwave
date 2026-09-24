@@ -262,6 +262,7 @@ pub trait ExternalTableReader: Sized {
         start_pk: Option<OwnedRow>,
         primary_keys: Vec<String>,
         limit: u32,
+        snapshot_filter: Option<String>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>>;
 
     fn get_parallel_cdc_splits(
@@ -275,6 +276,7 @@ pub trait ExternalTableReader: Sized {
         left: OwnedRow,
         right: OwnedRow,
         split_columns: Vec<Field>,
+        snapshot_filter: Option<String>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>>;
 }
 

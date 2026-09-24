@@ -59,6 +59,9 @@ pub struct SnapshotReadArgs {
     pub additional_columns: Vec<ColumnDesc>,
     pub schema_table_name: SchemaTableName,
     pub database_name: String,
+    /// Optional user-supplied WHERE-clause fragment applied to the snapshot SQL. When set, the
+    /// predicate is AND-combined with the internal primary-key cursor (`(pk) > ($1, ...)`).
+    pub snapshot_filter: Option<String>,
 }
 
 impl SnapshotReadArgs {
@@ -69,6 +72,7 @@ impl SnapshotReadArgs {
         additional_columns: Vec<ColumnDesc>,
         schema_table_name: SchemaTableName,
         database_name: String,
+        snapshot_filter: Option<String>,
     ) -> Self {
         Self {
             current_pos,
@@ -77,6 +81,7 @@ impl SnapshotReadArgs {
             additional_columns,
             schema_table_name,
             database_name,
+            snapshot_filter,
         }
     }
 }
@@ -90,6 +95,9 @@ pub struct SplitSnapshotReadArgs {
     pub additional_columns: Vec<ColumnDesc>,
     pub schema_table_name: SchemaTableName,
     pub database_name: String,
+    /// Optional user-supplied WHERE-clause fragment applied to the split snapshot SQL.
+    /// When set, the predicate is AND-combined with the split-bound predicate.
+    pub snapshot_filter: Option<String>,
 }
 
 impl SplitSnapshotReadArgs {
@@ -101,6 +109,7 @@ impl SplitSnapshotReadArgs {
         additional_columns: Vec<ColumnDesc>,
         schema_table_name: SchemaTableName,
         database_name: String,
+        snapshot_filter: Option<String>,
     ) -> Self {
         Self {
             left_bound_inclusive,
@@ -110,6 +119,7 @@ impl SplitSnapshotReadArgs {
             additional_columns,
             schema_table_name,
             database_name,
+            snapshot_filter,
         }
     }
 }
@@ -209,6 +219,7 @@ impl UpstreamTableRead for UpstreamTableReader<ExternalStorageTable> {
                 read_args.current_pos.clone(),
                 primary_keys.clone(),
                 batch_size,
+                read_args.snapshot_filter.clone(),
             );
 
             pin_mut!(row_stream);
@@ -296,6 +307,7 @@ impl UpstreamTableRead for UpstreamTableReader<ExternalStorageTable> {
             read_args.left_bound_inclusive.clone(),
             read_args.right_bound_exclusive.clone(),
             read_args.split_columns.clone(),
+            read_args.snapshot_filter.clone(),
         );
 
         pin_mut!(row_stream);
@@ -409,6 +421,7 @@ mod tests {
                 start_pk.clone(),
                 vec!["o_orderkey".to_owned()],
                 1000,
+                None,
             );
             let mut builder = DataChunkBuilder::new(rw_schema.clone().data_types(), 256);
             let chunk_stream = iter_chunks(row_stream, &mut builder);
